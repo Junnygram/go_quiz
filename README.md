@@ -1,1 +1,1 @@
-# go_quiz
+`go run quiz/main.go`

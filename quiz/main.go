@@ -7,125 +7,135 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
-//Number of Questions to ask
-const totalQuestions = 5
+var (
+	flagFilePath string
+	flagRandom   bool
+	flagTime     int
+	wg           sync.WaitGroup
+)
 
-//Question struct that stores question with answer
-type Question struct {
-    question string
-    answer   string
+func init() {
+	flag.StringVar(&flagFilePath, "file", "questions.csv", "path/to/csv_file")
+	flag.BoolVar(&flagRandom, "random", true, "randomize order of questions")
+	flag.IntVar(&flagTime, "time", 10, "test duration")
+	flag.Parse()
 }
 
 func main() {
-    filename, timeLimit := readArguments()
-    f, err := openFile(filename)
-    if err != nil {
-        return
-    }
-    questions, err := readCSV(f)
+	// this program will progress as follows
+	// read a csv filepath and a time limit from flags
+	// prompt for a key press
+	// on key press, start the quiz as follows
+	//
+	// while time has not elapsed:
+	// print a random question to the screen
+	// prompt the user for an answer
+	// store the answer in a container
+	// normalize answers so they compare correctly
+	// output total questions answered correctly and how many questions there
+	// were.
 
-    if err != nil {
-        // err := fmt.Errorf("Error in Reading Questions")
-        fmt.Println(err.Error())
-        return
-    }
+	csvPath, err := filepath.Abs(flagFilePath)
+	if err != nil {
+		log.Fatalln("Unable to parse path" + csvPath)
+	}
+	file, err := os.Open(csvPath)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer file.Close()
 
-    if questions == nil {
-        return
-    }
-    score, err := askQuestion(questions, timeLimit)
-    if err != nil {
-        fmt.Println(err)
-        return
-    }
+	csvReader := csv.NewReader(file)
+	csvData, err := csvReader.ReadAll()
+	if err != nil {
+		log.Fatalln(err)
+	}
 
-    fmt.Printf("Your Score %d/%d\n", score, totalQuestions)
+	var totalQuestions = len(csvData)
+	questions := make(map[int]string, totalQuestions)
+	answers := make(map[int]string, totalQuestions)
+	responses := make(map[int]string, totalQuestions)
+
+	for i, data := range csvData {
+		questions[i] = data[0]
+		answers[i] = data[1]
+	}
+
+	respondTo := make(chan string)
+
+	// block until user presses enter
+	fmt.Println("Press [Enter] to start test.")
+	bufio.NewScanner(os.Stdout).Scan()
+	if flagRandom {
+		// seed the random number generator with the current time
+		rand.Seed(time.Now().UTC().UnixNano())
+	}
+	// randPool should contain random indexes into the questions map
+	randPool := rand.Perm(totalQuestions)
+
+	wg.Add(1)
+	timeUp := time.After(time.Second * time.Duration(flagTime))
+	go func() {
+	label:
+		for i := 0; i < totalQuestions; i++ {
+			index := randPool[i]
+			go askQuestion(os.Stdout, os.Stdin, questions[index], respondTo)
+			select {
+			case <-timeUp:
+				fmt.Fprintln(os.Stderr, "\nTime up!")
+				break label
+			case ans, ok := <-respondTo:
+				if ok {
+					responses[index] = ans
+				} else {
+					break label
+				}
+			}
+		}
+		wg.Done()
+	}()
+	wg.Wait()
+
+	correct := 0
+	for i := 0; i < totalQuestions; i++ {
+		if checkAnswer(answers[i], responses[i]) {
+			correct++
+		}
+	}
+	summary(correct, totalQuestions)
 }
 
-func readArguments() (string, int) {
-    filename := flag.String("filename", "problem.csv", "CSV File that conatins quiz questions")
-    timeLimit := flag.Int("limit", 30, "Time Limit for each question")
-    flag.Parse()
-    return *filename, *timeLimit
+func askQuestion(w io.Writer, r io.Reader, question string, replyTo chan string) {
+	reader := bufio.NewReader(r)
+	fmt.Fprintln(w, "Question: "+question)
+	fmt.Fprint(w, "Answer: ")
+	answer, err := reader.ReadString('\n')
+	if err != nil {
+		close(replyTo)
+		if err == io.EOF {
+			return
+		}
+		log.Fatalln(err)
+	}
+	replyTo <- answer
 }
 
-func readCSV(f io.Reader) ([]Question, error) {
-    // defer f.Close() // this needs to be after the err check
-    allQuestions, err := csv.NewReader(f).ReadAll()
-    if err != nil {
-        return nil, err
-    }
-
-    numOfQues := len(allQuestions)
-    if numOfQues == 0 {
-        return nil, fmt.Errorf("No Question in file")
-    }
-
-    var data []Question
-    for _, line := range allQuestions {
-        ques := Question{}
-        ques.question = line[0]
-        ques.answer = line[1]
-        data = append(data, ques)
-    }
-
-    return data, nil
+func checkAnswer(ans string, expected string) bool {
+	if strings.EqualFold(strings.TrimSpace(ans), strings.TrimSpace(expected)) {
+		return true
+	}
+	return false
 }
 
-func openFile(filename string) (io.Reader, error) {
-    return os.Open(filename)
-}
-func getInput(input chan string) {
-    for {
-        in := bufio.NewReader(os.Stdin)
-        result, err := in.ReadString('\n')
-        if err != nil {
-            log.Fatal(err)
-        }
-
-        input <- result
-    }
-}
-
-func askQuestion(questions []Question, timeLimit int) (int, error) {
-    totalScore := 0
-    timer := time.NewTimer(time.Duration(timeLimit) * time.Second)
-    done := make(chan string)
-
-    go getInput(done)
-
-    for i := range [totalQuestions]int{} {
-        ans, err := eachQuestion(questions[i].question, questions[i].answer, timer.C, done)
-        if err != nil && ans == -1 {
-            return totalScore, nil
-        }
-        totalScore += ans
-
-    }
-    return totalScore, nil
-}
-
-func eachQuestion(Quest string, answer string, timer <-chan time.Time, done <-chan string) (int, error) {
-    fmt.Printf("%s: ", Quest)
-
-    for {
-        select {
-        case <-timer:
-            return -1, fmt.Errorf("Time out")
-        case ans := <-done:
-            score := 0
-            if strings.Compare(strings.Trim(strings.ToLower(ans), "\n"), answer) == 0 {
-                score = 1
-            } else {
-                return 0, fmt.Errorf("Wrong Answer")
-            }
-
-            return score, nil
-        }
-    }
+func summary(correct, totalQuestions int) {
+	fmt.Fprintf(os.Stdout, "You answered %d questions correctly (%d / %d)\n", correct,
+		correct, totalQuestions)
 }
