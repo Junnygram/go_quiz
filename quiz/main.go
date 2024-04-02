@@ -1,141 +1,74 @@
 package main
 
 import (
-	"bufio"
 	"encoding/csv"
 	"flag"
 	"fmt"
-	"io"
-	"log"
-	"math/rand"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
-var (
-	flagFilePath string
-	flagRandom   bool
-	flagTime     int
-	wg           sync.WaitGroup
-)
-
-func init() {
-	flag.StringVar(&flagFilePath, "file", "questions.csv", "path/to/csv_file")
-	flag.BoolVar(&flagRandom, "random", true, "randomize order of questions")
-	flag.IntVar(&flagTime, "time", 10, "test duration")
-	flag.Parse()
-}
-
 func main() {
-	// this program will progress as follows
-	// read a csv filepath and a time limit from flags
-	// prompt for a key press
-	// on key press, start the quiz as follows
-	//
-	// while time has not elapsed:
-	// print a random question to the screen
-	// prompt the user for an answer
-	// store the answer in a container
-	// normalize answers so they compare correctly
-	// output total questions answered correctly and how many questions there
-	// were.
+	csvFilename := flag.String("csv", "questions.csv", "a csv file in the format of 'question,answer'")
+	timeLimit := flag.Int("limit", 10, "the time limit for the quiz in seconds")
+	flag.Parse()
 
-	csvPath, err := filepath.Abs(flagFilePath)
+	file, err := os.Open(*csvFilename)
 	if err != nil {
-		log.Fatalln("Unable to parse path" + csvPath)
+		exit(fmt.Sprintf("Failed to open the CSV file: %s\n", *csvFilename))
 	}
-	file, err := os.Open(csvPath)
+	r := csv.NewReader(file)
+	lines, err := r.ReadAll()
 	if err != nil {
-		log.Fatalln(err)
+		exit("Failed to parse the provided CSV file.")
 	}
-	defer file.Close()
+	problems := parseLines(lines)
 
-	csvReader := csv.NewReader(file)
-	csvData, err := csvReader.ReadAll()
-	if err != nil {
-		log.Fatalln(err)
-	}
+	timer := time.NewTimer(time.Duration(*timeLimit) * time.Second)
+	correct := 0
 
-	var totalQuestions = len(csvData)
-	questions := make(map[int]string, totalQuestions)
-	answers := make(map[int]string, totalQuestions)
-	responses := make(map[int]string, totalQuestions)
+problemloop:
+	for i, p := range problems {
+		fmt.Printf("Problem #%d: %s = ", i+1, p.q)
+		answerCh := make(chan string)
+		go func() {
+			var answer string
+			fmt.Scanf("%s\n", &answer)
+			answerCh <- answer
+		}()
 
-	for i, data := range csvData {
-		questions[i] = data[0]
-		answers[i] = data[1]
-	}
-
-	respondTo := make(chan string)
-
-	// block until user presses enter
-	fmt.Println("Press [Enter] to start test.")
-	bufio.NewScanner(os.Stdout).Scan()
-	if flagRandom {
-		// seed the random number generator with the current time
-		rand.Seed(time.Now().UTC().UnixNano())
-	}
-	// randPool should contain random indexes into the questions map
-	randPool := rand.Perm(totalQuestions)
-
-	wg.Add(1)
-	timeUp := time.After(time.Second * time.Duration(flagTime))
-	go func() {
-	label:
-		for i := 0; i < totalQuestions; i++ {
-			index := randPool[i]
-			go askQuestion(os.Stdout, os.Stdin, questions[index], respondTo)
-			select {
-			case <-timeUp:
-				fmt.Fprintln(os.Stderr, "\nTime up!")
-				break label
-			case ans, ok := <-respondTo:
-				if ok {
-					responses[index] = ans
-				} else {
-					break label
-				}
+		select {
+		case <-timer.C:
+			fmt.Println()
+			break problemloop
+		case answer := <-answerCh:
+			if answer == p.a {
+				correct++
 			}
 		}
-		wg.Done()
-	}()
-	wg.Wait()
+	}
 
-	correct := 0
-	for i := 0; i < totalQuestions; i++ {
-		if checkAnswer(answers[i], responses[i]) {
-			correct++
+	fmt.Printf("You scored %d out of %d.\n", correct, len(problems))
+}
+
+func parseLines(lines [][]string) []problem {
+	ret := make([]problem, len(lines))
+	for i, line := range lines {
+		ret[i] = problem{
+			q: line[0],
+			a: strings.TrimSpace(line[1]),
 		}
 	}
-	summary(correct, totalQuestions)
+	return ret
 }
 
-func askQuestion(w io.Writer, r io.Reader, question string, replyTo chan string) {
-	reader := bufio.NewReader(r)
-	fmt.Fprintln(w, "Question: "+question)
-	fmt.Fprint(w, "Answer: ")
-	answer, err := reader.ReadString('\n')
-	if err != nil {
-		close(replyTo)
-		if err == io.EOF {
-			return
-		}
-		log.Fatalln(err)
-	}
-	replyTo <- answer
+type problem struct {
+	q string
+	a string
 }
 
-func checkAnswer(ans string, expected string) bool {
-	if strings.EqualFold(strings.TrimSpace(ans), strings.TrimSpace(expected)) {
-		return true
-	}
-	return false
-}
-
-func summary(correct, totalQuestions int) {
-	fmt.Fprintf(os.Stdout, "You answered %d questions correctly (%d / %d)\n", correct,
-		correct, totalQuestions)
+func exit(msg string) {
+	fmt.Println(msg)
+	os.Exit(1)
 }
